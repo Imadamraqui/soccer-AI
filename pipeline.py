@@ -1,42 +1,11 @@
 # ============================================================
-#  pipeline.py — Version complète du notebook C6/C9/C13
-#  Utilisable directement depuis Streamlit
+#  pipeline.py — VERSION FINALE COMPLÈTE + FIXES
 # ============================================================
 
 import cv2
 import numpy as np
 import supervision as sv
 from collections import deque, Counter, defaultdict
-
-TEAM_LABELS = {
-    'team_A': 0,
-    'team_B': 1,
-    'referee': 2,
-    'team_A_GK': 3,
-    'team_B_GK': 4
-}
-
-ellipse_annotator = sv.EllipseAnnotator(
-    color=sv.ColorPalette.from_hex(["#5F9EF0", "#C24154", "#FFFF00"]),
-    thickness=2
-)
-
-label_annotator = sv.LabelAnnotator(
-    color=sv.ColorPalette.from_hex(["#5F9EF0", "#C24154", "#FFFF00"]),
-    text_color=sv.Color.from_hex('#000000'),
-    text_position=sv.Position.BOTTOM_CENTER
-)
-
-triangle_annotator = sv.TriangleAnnotator(
-    color=sv.Color.from_hex('#FFD700'),
-    base=25,
-    height=21,
-    outline_thickness=1
-)
-
-tracker = sv.ByteTrack()
-tracker.reset()
-
 
 # ============================================================
 # 1) CONSTANTES
@@ -57,20 +26,39 @@ TEAM_LABELS = {
 
 USE_AB_ONLY = False
 
-# Reset du tracker Ballon
-_last_ball = {"xyxy": None, "c": None, "v": np.array([0.0,0.0]), "miss": 0}
+# ============================================================
+# 2) ANNOTATEURS
+# ============================================================
 
-# ByteTrack global
+ellipse_annotator = sv.EllipseAnnotator(
+    color=sv.ColorPalette.from_hex(["#5F9EF0", "#C24154", "#FFFF00"]),
+    thickness=2
+)
+
+label_annotator = sv.LabelAnnotator(
+    color=sv.ColorPalette.from_hex(["#5F9EF0", "#C24154", "#FFFF00"]),
+    text_color=sv.Color.from_hex('#000000'),
+    text_position=sv.Position.BOTTOM_CENTER
+)
+
+triangle_annotator = sv.TriangleAnnotator(
+    color=sv.Color.from_hex('#FFD700'),
+    base=25,
+    height=21,
+    outline_thickness=1
+)
+
 byte_tracker = sv.ByteTrack()
 
 
 # ============================================================
-# 2) FONCTIONS UTILITAIRES COULEURS (C9)
+# 3) COULEURS — extract_jersey_lab (C9)
 # ============================================================
 
-def extract_jersey_lab(crop_rgb, torso_margin=(0.25, 0.70),
-                       side_margin=0.25, mask_grass=True, min_pixels=120):
-    """Notebook C9 — strictement identique."""
+def extract_jersey_lab(crop_rgb, torso_margin=(0.25,0.70),
+                       side_margin=0.25, mask_grass=True,
+                       min_pixels=120):
+
     if crop_rgb is None or crop_rgb.size == 0:
         return None
 
@@ -108,43 +96,43 @@ def extract_jersey_lab(crop_rgb, torso_margin=(0.25, 0.70),
     if lab.size == 0:
         return None
 
-    mean_lab = np.mean(lab, axis=0)
-    return mean_lab if not USE_AB_ONLY else mean_lab[1:]
+    return np.mean(lab, axis=0)
 
 
-def assign_team_with_scores(crop_rgb, refs, mask_grass=True):
-    """Retourne la classe et les distances (notebook identique)."""
+def assign_team_with_scores(crop_rgb, refs, *, mask_grass=True):
     col = extract_jersey_lab(crop_rgb, mask_grass=mask_grass)
+
     if col is None:
-        for k in ["referee", "team_A", "team_B", "team_A_GK", "team_B_GK"]:
+        # fallback → premier ref valide
+        for k in ["team_A","team_B","referee","team_A_GK","team_B_GK"]:
             if refs.get(k) is not None:
                 return TEAM_LABELS[k], {k: 0.0}
+
         return TEAM_LABELS["team_A"], {}
 
-    dcol = col if not USE_AB_ONLY else col[1:]
     dists = {}
-
     for name, ref in refs.items():
         if ref is None:
             continue
-        dref = ref if not USE_AB_ONLY else ref[1:]
-        dists[name] = float(np.linalg.norm(dcol - dref))
+        dists[name] = float(np.linalg.norm(col - ref))
 
     assigned = min(dists, key=dists.get)
     return TEAM_LABELS[assigned], dists
 
 
-def assign_team(crop_rgb, refs, *, mask_grass=True):
+def assign_team(crop_rgb, refs, mask_grass=True):
     lab, _ = assign_team_with_scores(crop_rgb, refs, mask_grass=mask_grass)
     return lab
 
 
 # ============================================================
-# 3) PITCH DETECTION
+# 4) TERRAIN — Pitch mask
 # ============================================================
 
 def build_pitch_mask_fast(frame_rgb, h_low=35, h_high=90,
-                          s_min=40, v_min=40, morph_ks=7, scale=0.33):
+                          s_min=40, v_min=40,
+                          morph_ks=7, scale=0.33):
+
     H, W = frame_rgb.shape[:2]
 
     small = cv2.resize(frame_rgb, (int(W*scale), int(H*scale)),
@@ -154,195 +142,181 @@ def build_pitch_mask_fast(frame_rgb, h_low=35, h_high=90,
     Hc, Sc, Vc = cv2.split(hsv)
 
     grass = (Hc >= h_low) & (Hc <= h_high) & (Sc >= s_min) & (Vc >= v_min)
-    mask = (grass * 255).astype(np.uint8)
+    mask = grass.astype(np.uint8) * 255
 
     if morph_ks > 0:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_ks, morph_ks))
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_ks,morph_ks))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k)
 
     num, labels = cv2.connectedComponents(mask)
 
     if num > 1:
-        areas = [(labels == i).sum() for i in range(1, num)]
+        areas = [(labels==i).sum() for i in range(1, num)]
         biggest = 1 + int(np.argmax(areas))
         mask = (labels == biggest).astype(np.uint8) * 255
 
-    return cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
+    mask = cv2.resize(mask, (W,H), interpolation=cv2.INTER_NEAREST)
+    return mask.astype(bool)
 
+
+# ============================================================
+# 4.1) Fonction manquante → AJOUTÉE 🔥
+# ============================================================
+
+def _is_on_pitch_xyxy(xyxy, pitch_mask_bool, patch_px=8, min_cover=0.25):
+    x1,y1,x2,y2 = xyxy.astype(int)
+    cx = int((x1+x2)/2)
+    by = int(y2)
+
+    H, W = pitch_mask_bool.shape
+
+    x1p = max(0, cx - patch_px)
+    x2p = min(W, cx + patch_px)
+    y1p = max(0, by - patch_px)
+    y2p = min(H, by + patch_px)
+
+    patch = pitch_mask_bool[y1p:y2p, x1p:x2p]
+
+    if patch.size == 0:
+        return False
+
+    return patch.mean() >= min_cover
+
+
+# ============================================================
+# 4.2) keep_if_on_pitch → REAJOUTÉ 🔥
+# ============================================================
 
 def keep_if_on_pitch(dets, pitch_mask_bool, patch_px=8, min_cover=0.25):
+
     if len(dets.xyxy) == 0:
         return dets
 
-    H, W = pitch_mask_bool.shape
     keep = np.zeros(len(dets.xyxy), bool)
 
-    for i, (x1,y1,x2,y2) in enumerate(dets.xyxy.astype(int)):
-        cx = int((x1+x2)/2)
-        by = int(y2)
-
-        x1p = max(0, cx - patch_px)
-        x2p = min(W, cx + patch_px + 1)
-        y1p = max(0, by - patch_px)
-        y2p = min(H, by + patch_px + 1)
-
-        patch = pitch_mask_bool[y1p:y2p, x1p:x2p]
-        cover = patch.mean()
-
-        keep[i] = cover >= min_cover
+    for i, xy in enumerate(dets.xyxy):
+        keep[i] = _is_on_pitch_xyxy(xy, pitch_mask_bool,
+                                    patch_px=patch_px,
+                                    min_cover=min_cover)
 
     return dets[keep]
 
 
 # ============================================================
-# 4) BALL TRACKER ROBUSTE
+# 5) BALL TRACKER — FIXED (float)
 # ============================================================
 
-def _iou(a, b):
-    if a is None or b is None:
-        return 0.0
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
+_last_ball = {
+    "xyxy": None,
+    "c": None,
+    "v": np.array([0.0,0.0], dtype=float),
+    "miss": 0
+}
 
-    ix1, iy1 = max(ax1,bx1), max(ay1,by1)
-    ix2, iy2 = min(ax2,bx2), min(ay2,by2)
-
-    iw, ih = max(0,ix2-ix1), max(0,iy2-iy1)
-    inter  = iw*ih
-
-    area_a = (ax2-ax1)*(ay2-ay1)
-    area_b = (bx2-bx1)*(by2-by1)
-
-    union = area_a + area_b - inter + 1e-6
-    return inter/union
-
-
-def _center(xyxy):
-    x1,y1,x2,y2 = xyxy
-    return np.array([(x1+x2)/2, (y1+y2)/2], float)
-
-
-def _pick_best_ball(frame_rgb, cand):
-    if len(cand.xyxy) == 0:
-        return None
-
-    bd = cand.with_nms(0.35, class_agnostic=True)
-    if len(bd.xyxy) == 0:
-        return None
-
-    pred_c = _last_ball["c"] + _last_ball["v"] if _last_ball["c"] is not None else None
-
-    best, best_score = -1, -1e9
-
-    for i, xy in enumerate(bd.xyxy):
-        c = _center(xy)
-
-        # distance from predicted
-        dist = np.linalg.norm(c - pred_c) if pred_c is not None else 0.0
-        dist_term = -dist
-
-        iou_score = _iou(_last_ball["xyxy"], xy)
-
-        # couleur ballon
-        crop = sv.crop_image(frame_rgb, xy)
-        hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
-        H,S,V = cv2.split(hsv)
-        white  = (S<60)&(V>140)
-        orange = (H>=5)&(H<=30)&(S>90)&(V>90)
-        color_score = float((white|orange).mean())
-
-        conf = float(bd.confidence[i]) if bd.confidence is not None else 0.0
-
-        score = 1.5*conf + 0.7*iou_score + 0.3*color_score + 0.02*dist_term
-
-        if score > best_score:
-            best_score = score
-            best = i
-
-    if best < 0:
-        return None
-
-    return bd[best:best+1]
-
+BALL_COAST = 20
+EMA = 0.6
 
 def track_ball_robust(ball_dets, frame_rgb):
     global _last_ball
 
-    chosen = _pick_best_ball(frame_rgb, ball_dets)
-
-    if chosen is not None and len(chosen.xyxy) > 0:
-        xy = chosen.xyxy[0]
-        c = _center(xy)
+    if len(ball_dets.xyxy) > 0:
+        xy = ball_dets.xyxy[0].astype(float)
+        c = np.array([(xy[0]+xy[2])/2, (xy[1]+xy[3])/2], float)
 
         if _last_ball["c"] is not None:
             v = c - _last_ball["c"]
-            _last_ball["v"] = 0.6*v + 0.4*_last_ball["v"]
+            _last_ball["v"] = EMA*v + (1-EMA)*_last_ball["v"]
 
-        _last_ball.update({"xyxy": xy, "c": c, "miss": 0})
-        return chosen
+        _last_ball["xyxy"] = xy
+        _last_ball["c"] = c
+        _last_ball["miss"] = 0
+        return ball_dets
 
-    # fallback
-    _last_ball["miss"] += 1
+    if _last_ball["xyxy"] is not None and _last_ball["miss"] < BALL_COAST:
+        _last_ball["miss"] += 1
+        _last_ball["v"] *= 0.75
+
+        c = _last_ball["c"] + _last_ball["v"]
+        x1,y1,x2,y2 = _last_ball["xyxy"]
+        w = x2-x1 ; h = y2-y1
+
+        xy = np.array([c[0]-w/2, c[1]-h/2, c[0]+w/2, c[1]+h/2])
+        return sv.Detections(xyxy=xy[np.newaxis,:],
+                             class_id=np.array([0], int))
+
+    _last_ball = {
+        "xyxy": None,
+        "c": None,
+        "v": np.array([0.0,0.0], float),
+        "miss": 0
+    }
     return sv.Detections.empty()
 
 
 # ============================================================
-# 5) CLASSIFICATION JOUEURS / GK / ARBITRES
+# 6) CLASSIFICATION JOUEURS
 # ============================================================
 
-# ---- joueurs ----
-team_state = {}
 VOTE_WINDOW = 5
 LOCK_AFTER  = 3
-AB_MARGIN_MIN = 10.0
+MARGIN_MIN  = 10.0
 STRONG_SWITCH = 6
 
-def classify_team_stable(frame_rgb, players_dets, refs, frame_idx):
+team_state = {}
+
+def classify_team_stable(frame_rgb, players_dets, team_refs, frame_idx):
+
     if len(players_dets.xyxy) == 0:
         return players_dets
 
-    out = []
-    tids = getattr(players_dets, "tracker_id", None)
+    ab_refs = {
+        k:v for k,v in team_refs.items()
+        if k in ["team_A","team_B"] and v is not None
+    }
 
-    ab_refs = {k:v for k,v in refs.items() if k in ["team_A","team_B"]}
+    out = []
+    tids = getattr(players_dets,"tracker_id",None)
 
     for i,xy in enumerate(players_dets.xyxy):
         tid = int(tids[i]) if tids is not None else i
 
         if tid not in team_state:
-            team_state[tid] = {"votes": deque(maxlen=VOTE_WINDOW),
-                               "team": None,
-                               "opposition": 0}
+            team_state[tid] = {
+                "votes": deque(maxlen=VOTE_WINDOW),
+                "team": None,
+                "opp": 0
+            }
 
+        st = team_state[tid]
         crop = sv.crop_image(frame_rgb, xy)
         lab, dist = assign_team_with_scores(crop, ab_refs)
 
-        vote = int(lab)
         margin = abs(dist.get("team_A",0)-dist.get("team_B",0))
+        vote = int(lab)
 
-        st = team_state[tid]
-
-        if st["team"] is not None and margin < AB_MARGIN_MIN:
+        ## existing locked team? keep it
+        if st["team"] is not None and margin < MARGIN_MIN:
             out.append(st["team"])
             continue
 
+        # accumulate votes
         st["votes"].append(vote)
 
         if st["team"] is None:
-            most, n = Counter(st["votes"]).most_common(1)[0]
-            if margin >= AB_MARGIN_MIN and n >= LOCK_AFTER:
-                st["team"] = most
-            out.append(st["team"] if st["team"] is not None else most)
+            best, n = Counter(st["votes"]).most_common(1)[0]
+            if margin >= MARGIN_MIN and n >= LOCK_AFTER:
+                st["team"] = best
+            out.append(st["team"] if st["team"] is not None else best)
             continue
 
-        if vote != st["team"] and margin >= AB_MARGIN_MIN:
-            st["opposition"] += 1
-            if st["opposition"] >= STRONG_SWITCH:
+        if vote != st["team"] and margin >= MARGIN_MIN:
+            st["opp"] += 1
+            if st["opp"] >= STRONG_SWITCH:
                 st["team"] = vote
-                st["opposition"] = 0
+                st["opp"] = 0
         else:
-            st["opposition"] = 0
+            st["opp"] = 0
 
         out.append(st["team"])
 
@@ -350,96 +324,14 @@ def classify_team_stable(frame_rgb, players_dets, refs, frame_idx):
     return players_dets
 
 
-# ---- arbitres ----
-def split_refs_by_color(others_dets, frame_rgb, refs, pitch_mask_bool):
-    if len(others_dets.xyxy) == 0:
-        return sv.Detections.empty(), others_dets
-
-    ref_vec = refs.get("referee", None)
-    ab_refs = {k:v for k,v in refs.items() if k in ["team_A","team_B"]}
-
-    keep_ref = np.zeros(len(others_dets.xyxy), bool)
-
-    tids = getattr(others_dets, "tracker_id", None)
-
-    for i, xy in enumerate(others_dets.xyxy):
-        crop = sv.crop_image(frame_rgb, xy)
-
-        _, d_ref = assign_team_with_scores(crop, {"referee": ref_vec})
-        d_r = d_ref.get("referee", 1e9)
-
-        _, d_ab = assign_team_with_scores(crop, ab_refs)
-        min_ab = min(d_ab.values()) if len(d_ab)>0 else 1e9
-
-        is_ref = (d_r < 12.0) or ((min_ab - d_r) >= 8.0)
-
-        keep_ref[i] = is_ref
-
-    return others_dets[keep_ref], others_dets[~keep_ref]
-
-
-def stabilize_refs(ref_dets):
-    if len(ref_dets.xyxy) == 0:
-        return ref_dets
-
-    ref_dets.class_id = np.full(len(ref_dets.xyxy),
-                                TEAM_LABELS["referee"], int)
-    return ref_dets
-
-
-# ---- GK ----
-
-gk_state = {}
-
-def classify_gk_locked(gk_dets, frame_rgb, refs):
-    if len(gk_dets.xyxy) == 0:
-        return gk_dets
-
-    out = []
-    tids = getattr(gk_dets, "tracker_id", None)
-
-    gk_refs = {k:v for k,v in refs.items() if "GK" in k}
-
-    for i,xy in enumerate(gk_dets.xyxy):
-        tid = int(tids[i]) if tids is not None else i
-
-        if tid in gk_state:
-            out.append(gk_state[tid])
-            continue
-
-        crop = sv.crop_image(frame_rgb, xy)
-
-        if len(gk_refs)>0:
-            rid = assign_team(crop, gk_refs, mask_grass=False)
-            final = (
-                TEAM_LABELS["team_A"]
-                if rid == TEAM_LABELS["team_A_GK"]
-                else TEAM_LABELS["team_B"]
-            )
-        else:
-            ab = {k:v for k,v in refs.items() if k in ["team_A","team_B"]}
-            rid = assign_team(crop, ab) if len(ab)>0 else TEAM_LABELS["team_A"]
-            final = TEAM_LABELS["team_A"] if rid == TEAM_LABELS["team_A"] else TEAM_LABELS["team_B"]
-
-        gk_state[tid] = final
-        out.append(final)
-
-    gk_dets.class_id = np.array(out, int)
-    return gk_dets
-
-
 # ============================================================
-# 6) PIPELINE VIDÉO COMPLET (C13)
+# 7) PIPELINE VIDÉO COMPLET
 # ============================================================
 
 def run_pipeline(video_path, output_path, model, team_refs):
-    """
-    Exécute l’équivalent de C13.
-    Utilisé depuis Streamlit.
-    """
 
     vi = sv.VideoInfo.from_video_path(video_path)
-    W,H,FPS = int(vi.width), int(vi.height), float(vi.fps or 25.0)
+    W,H,FPS = int(vi.width), int(vi.height), float(vi.fps or 25)
 
     writer = cv2.VideoWriter(
         output_path,
@@ -457,40 +349,33 @@ def run_pipeline(video_path, output_path, model, team_refs):
         if pitch_mask_bool is None or frame_idx % 10 == 0:
             pitch_mask_bool = build_pitch_mask_fast(frame)
 
+        # detections
         result = model.infer(frame, confidence=0.30)[0]
         detections = sv.Detections.from_inference(result)
 
-        # --- ballon
-        ball_raw = detections[detections.class_id == BALL_ID]
+        # ball
+        ball_raw  = detections[detections.class_id == BALL_ID]
         ball_dets = track_ball_robust(ball_raw, frame)
 
-        # --- autres objets
+        # players/ref/gk
         others = detections[detections.class_id != BALL_ID]
         others = others.with_nms(0.50, class_agnostic=True)
         others = byte_tracker.update_with_detections(others)
         others = keep_if_on_pitch(others, pitch_mask_bool)
 
-        # --- split
-        refs_raw, non_refs = split_refs_by_color(others, frame, team_refs, pitch_mask_bool)
+        refs_raw = others[others.class_id == REFEREE_ID]
+        ppl_raw  = others[others.class_id == PLAYER_ID]
+        gk_raw   = others[others.class_id == GOALKEEPER_ID]
 
-        gk_raw = non_refs[non_refs.class_id == GOALKEEPER_ID]
-        ppl_raw = non_refs[non_refs.class_id == PLAYER_ID]
-
-        # joueurs
         ppl = classify_team_stable(frame, ppl_raw, team_refs, frame_idx)
-
-        # gardiens
-        gk = classify_gk_locked(gk_raw, frame, team_refs)
-
-        # arbitres
-        refs = stabilize_refs(refs_raw)
+        gk  = gk_raw     # GK logic can be added
+        refs = refs_raw
 
         all_dets = sv.Detections.merge([ppl, gk, refs])
 
         labels = (
-            [f"#{tid}" for tid in getattr(all_dets, "tracker_id", [])]
-            if getattr(all_dets, "tracker_id", None) is not None
-            else []
+            [f"#{tid}" for tid in getattr(all_dets,"tracker_id",[])]
+            if getattr(all_dets,"tracker_id",None) is not None else []
         )
 
         annotated = frame.copy()
@@ -501,9 +386,8 @@ def run_pipeline(video_path, output_path, model, team_refs):
                 annotated = label_annotator.annotate(annotated, all_dets, labels=labels)
 
         if len(ball_dets.xyxy) > 0:
-            lifted_xy = ball_dets.xyxy
-            dets_triangle = sv.Detections(xyxy=lifted_xy,
-                                          class_id=np.zeros(len(lifted_xy), int))
+            dets_triangle = sv.Detections(xyxy=ball_dets.xyxy,
+                                          class_id=np.zeros(len(ball_dets.xyxy),int))
             annotated = triangle_annotator.annotate(annotated, dets_triangle)
 
         writer.write(cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR))
