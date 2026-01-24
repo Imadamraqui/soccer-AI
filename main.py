@@ -23,6 +23,14 @@ def load_player_model():
     )
 
 
+@st.cache_resource
+def load_field_model():
+    return get_model(
+        "football-field-detection-f07vi/14",         # modèle de détection de terrain
+        api_key=st.secrets["ROBOFLOW_API_KEY"]
+    )
+
+
 # =========================================================
 # 2) Extraction frame & crops (version C6 adaptée)
 # =========================================================
@@ -131,6 +139,7 @@ def main():
             "team_A_GK": None,
             "team_B_GK": None,
         }
+        st.session_state.stats = None
 
     video_path = st.session_state.video_path
 
@@ -139,9 +148,10 @@ def main():
     st.video(video_path)
 
     # -------------------------
-    #  Chargement modèle
+    #  Chargement modèles
     # -------------------------
     model = load_player_model()
+    field_model = load_field_model()
 
     # -------------------------
     #  Sélection frame pour les crops
@@ -347,19 +357,23 @@ def main():
             st.json({k: (v.tolist() if v is not None else None) for k, v in team_refs.items()})
 
             # Lancer la pipeline vidéo
-            with st.spinner("Analyse de la vidéo & génération de la sortie annotée (C13)..."):
+            with st.spinner("Analyse de la vidéo & génération de la sortie annotée avec statistiques..."):
                 out_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 out_tmp.close()
                 output_path = out_tmp.name
 
-                output_path = run_pipeline(
+                output_path, stats = run_pipeline(
                     video_path=video_path,
                     output_path=output_path,
                     model=model,
-                    team_refs=team_refs
+                    team_refs=team_refs,
+                    field_model=field_model
                 )
+                
+                # Sauvegarder les stats dans session_state
+                st.session_state.stats = stats
 
-            st.success("🎉 Vidéo annotée générée !")
+            st.success("🎉 Vidéo annotée générée avec statistiques !")
             st.video(output_path)
 
             # Bouton de téléchargement
@@ -370,6 +384,182 @@ def main():
                     file_name="video_tacticalview_annotated.mp4",
                     mime="video/mp4"
                 )
+            
+            # =====================================================
+            #  AFFICHAGE DES STATISTIQUES
+            # =====================================================
+            st.markdown("---")
+            st.subheader("📊 Statistiques du Match")
+            
+            if "stats" in st.session_state and st.session_state.stats:
+                stats = st.session_state.stats
+                
+                # Style CSS pour les cartes modernes
+                st.markdown("""
+                <style>
+                .stat-card {
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    padding: 1.5rem;
+                    border-radius: 15px;
+                    color: white;
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    margin-bottom: 1rem;
+                }
+                .stat-card-ball {
+                    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                }
+                .stat-card-team {
+                    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+                }
+                .stat-title {
+                    font-size: 0.9rem;
+                    opacity: 0.9;
+                    margin-bottom: 0.5rem;
+                }
+                .stat-value {
+                    font-size: 2rem;
+                    font-weight: bold;
+                    margin: 0;
+                }
+                .stat-label {
+                    font-size: 0.8rem;
+                    opacity: 0.8;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+                
+                # Métriques principales en colonnes
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.markdown(f"""
+                    <div class="stat-card stat-card-ball">
+                        <div class="stat-title">📏 Distance Ballon</div>
+                        <div class="stat-value">{stats['ball']['distance_totale']:.0f}</div>
+                        <div class="stat-label">unités terrain</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown(f"""
+                    <div class="stat-card stat-card-ball">
+                        <div class="stat-title">⚡ Vitesse Moyenne</div>
+                        <div class="stat-value">{stats['ball']['vitesse_moyenne']:.0f}</div>
+                        <div class="stat-label">u/s</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col3:
+                    st.markdown(f"""
+                    <div class="stat-card stat-card-ball">
+                        <div class="stat-title">⚡ Vitesse Max</div>
+                        <div class="stat-value">{stats['ball']['vitesse_max']:.0f}</div>
+                        <div class="stat-label">u/s</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col4:
+                    st.markdown(f"""
+                    <div class="stat-card stat-card-ball">
+                        <div class="stat-title">🎯 Tirs Détectés</div>
+                        <div class="stat-value">{stats['ball']['nombre_tirs']}</div>
+                        <div class="stat-label">pics de vitesse</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Possession et Répartition
+                st.markdown("### 🕒 Possession & Répartition du Jeu")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Possession
+                    team_a_poss = stats['possession']['team_A']
+                    team_b_poss = stats['possession']['team_B']
+                    
+                    st.markdown(f"""
+                    <div class="stat-card stat-card-team">
+                        <div class="stat-title">Possession de Balle</div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
+                            <div style="flex: 1;">
+                                <div style="font-size: 1.5rem; font-weight: bold;">Team A</div>
+                                <div style="font-size: 2.5rem; font-weight: bold;">{team_a_poss:.1f}%</div>
+                            </div>
+                            <div style="flex: 1; text-align: right;">
+                                <div style="font-size: 1.5rem; font-weight: bold;">Team B</div>
+                                <div style="font-size: 2.5rem; font-weight: bold;">{team_b_poss:.1f}%</div>
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Barre de progression possession
+                    st.progress(team_a_poss / 100, text=f"Team A: {team_a_poss:.1f}% | Team B: {team_b_poss:.1f}%")
+                
+                with col2:
+                    # Répartition gauche/droite
+                    left_ratio = stats['ball']['left_ratio']
+                    right_ratio = stats['ball']['right_ratio']
+                    
+                    st.markdown(f"""
+                    <div class="stat-card stat-card-team">
+                        <div class="stat-title">Répartition Spatiale</div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
+                            <div style="flex: 1;">
+                                <div style="font-size: 1.5rem; font-weight: bold;">⬅️ Gauche</div>
+                                <div style="font-size: 2.5rem; font-weight: bold;">{left_ratio:.1f}%</div>
+                            </div>
+                            <div style="flex: 1; text-align: right;">
+                                <div style="font-size: 1.5rem; font-weight: bold;">➡️ Droite</div>
+                                <div style="font-size: 2.5rem; font-weight: bold;">{right_ratio:.1f}%</div>
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    st.progress(left_ratio / 100, text=f"Gauche: {left_ratio:.1f}% | Droite: {right_ratio:.1f}%")
+                
+                # Mouvements du ballon
+                st.markdown("### 🧭 Mouvements du Ballon")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric(
+                        label="➡️ Avancées",
+                        value=stats['ball']['forward_moves'],
+                        delta=None
+                    )
+                
+                with col2:
+                    st.metric(
+                        label="⬅️ Retours",
+                        value=stats['ball']['backward_moves'],
+                        delta=None
+                    )
+                
+                with col3:
+                    total_moves = stats['ball']['forward_moves'] + stats['ball']['backward_moves']
+                    st.metric(
+                        label="📊 Total Mouvements",
+                        value=total_moves,
+                        delta=None
+                    )
+                
+                # Informations vidéo
+                st.markdown("### 📹 Informations Vidéo")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.metric("Durée", f"{stats['video_duration']:.2f} secondes")
+                
+                with col2:
+                    st.metric("Nombre de Frames", stats['total_frames'])
+                
+                # Section détaillée (expandable)
+                with st.expander("📋 Détails Complets des Statistiques"):
+                    st.json(stats)
 
 
 if __name__ == "__main__":
