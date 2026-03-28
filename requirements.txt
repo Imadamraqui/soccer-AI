@@ -1,0 +1,7 @@
+ultralytics
+roboflow
+streamlit
+opencv-python
+numpy
+supervision
+scipy
